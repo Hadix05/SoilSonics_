@@ -1,0 +1,348 @@
+# Source - https://stackoverflow.com/a/66892766
+# Posted by kidkoder432, modified by community. See post 'Timeline' for change history
+# Retrieved 2026-10-28, License - CC BY-SA 4.0
+
+
+# pip install numpy pandas scipy matplotlib soundfile 
+# ^^ maybe potentially all the needed libraries
+
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from scipy.io import wavfile
+from scipy.signal import hilbert
+from scipy.stats import kurtosis, skew
+import soundfile as sf
+import os
+from os import path
+
+
+# ---------------------------setup/global vars-----------------------------------------
+
+
+WAV_FOLDER = "InitialTestData"          
+CSV_FILE = "InitialTestData/InitialTestDatasheet(Sheet1).csv"    
+
+WINDOW_SECONDS = 1.0   
+TRIM_SECONDS = 3.0     
+
+COL_FILENAME = "Recording Filename"
+COL_OBJECT = "Type of Object"
+COL_FREQ = "hrtz"
+
+RECORDING_FILES_NAMES = [
+    "11-5-26-initial-system-test.wav",
+    "11-5-26-initial-test-object.wav",
+    "11-5-2026-inital-test-agar-higher-frequency.wav",
+    "11-5-2026-initial-test-agar-object.wav",
+    "11-5-2026-initial-test-higher-frequency-baseline-test.wav",
+    "11-5-2026-initial-test-higher-frequency.wav"
+]
+
+# what each feature means  (printed when the script runs, claude helped with this)
+
+FEATURE_HELP = {
+    "loudness":        "Average strength of the signal (RMS). Bigger = louder.",
+    "peak":            "The single biggest spike in the window.",
+    "peak_to_peak":    "Distance from the lowest dip to the highest spike.",
+    "spikiness":       "Peak divided by loudness (crest factor). A pure steady tone "
+                       "is about 1.4; spiky/noisy signals are higher.",
+    "zero_crossings":  "How many times per second the wave crosses the zero line. "
+                       "Roughly tells how fast / how noisy the wave is.",
+    "envelope_mean":   "Average height of the wave's outline (its 'envelope').",
+    "wobble":          "How much that outline changes over time. 0 = perfectly steady, "
+                       "bigger = the volume is fluctuating.",
+    "skewness":        "Is the wave lopsided (more positive than negative)? 0 = balanced.",
+    "kurtosis":        "How heavy the 'tails' are. Large values mean rare, extreme spikes.",
+}
+
+FEATURES = list(FEATURE_HELP.keys())
+
+
+
+# -------------------------------functions--------------------------------------------------
+
+# create/return a dataframe w/ all the info from the csv
+def ReadCSV(csv_file):
+    info = pd.read_csv(csv_file, sep=None, engine="python")
+    # Remove completely empty rows
+    info = info.dropna(how="all")
+
+    info.columns = info.columns.str.strip()  
+
+    df = pd.DataFrame()
+    df["name"] = info[COL_FILENAME].astype(str).str.strip()
+    df["frequency"] = info[COL_FREQ].astype(int)
+
+    # n/a in object column --> NO object present
+    object_col = info[COL_OBJECT].fillna("N/A")
+    object_type = object_col.astype(str).str.strip()
+    no_object = object_type.str.lower().isin(["n/a", "","nan", "none"])
+
+    df["has_object"] = ~no_object
+    df["group"] = np.where(no_object, "No object", object_type)
+    return df
+
+# return all the .wav files that are found in a folder by their path
+def FindWavFiles(folder):
+
+    files = {}
+    for path in Path(folder).rglob("*.wav"):
+        files[path.stem.lower()] = path   # path.stem = filename without .wav
+    return files
+
+# name has all info
+def GetBasicAudioInfo(file):
+    data, samplerate = sf.read(file)
+
+    return {
+        "sample_rate": samplerate,
+        "duration": len(data) / samplerate,
+        "samples": len(data),
+        "channels": 1 if data.ndim == 1 else data.shape[0]
+    }
+
+# plot the waveform of a given file
+def PlotTheWave(file):
+    data, samplerate = sf.read(file)
+
+    time = np.arange(len(data)) / samplerate
+
+    plt.plot(time, data)
+
+    plt.xlabel("Time (seconds)")
+    plt.ylabel("Amplitude")
+
+    plt.show()
+
+# take data and return a dictionary of features.
+def MeasureWindow(piece, sample_rate):
+
+    seconds = len(piece) / sample_rate
+
+    loudness = np.sqrt(np.mean(piece ** 2))          # Root Mean Square (RMS) of the audio signal
+    peak = np.max(np.abs(piece))
+
+    signs = np.sign(piece)
+    flips = np.sum(signs[1:] != signs[:-1])
+
+    envelope = np.abs(hilbert(piece))
+
+    # feature choices taken from different tutorials, explanations given at top of code
+    return {
+        "loudness": loudness,
+        "peak": peak,
+        "peak_to_peak": np.max(piece) - np.min(piece),
+        "spikiness": peak / loudness,
+        "zero_crossings": flips / seconds,
+        "envelope_mean": envelope.mean(),
+        "wobble": envelope.std() / envelope.mean(),
+        "skewness": skew(piece),
+        "kurtosis": kurtosis(piece),
+    }
+
+# chop up the recording into differentt data points
+def MeasureRecording(signal, sample_rate):
+    # Trim the start and end (some of them started kinda late/I bumped the table as I hit record)
+    trim = int(TRIM_SECONDS * sample_rate)
+    signal = signal[trim: len(signal) - trim]
+
+    window_size = int(WINDOW_SECONDS * sample_rate)
+    number_of_windows = len(signal) // window_size
+
+    rows = []
+    for i in range(number_of_windows):
+        piece = signal[i * window_size: (i + 1) * window_size]
+        row = MeasureWindow(piece, sample_rate)
+        row["time_s"] = TRIM_SECONDS + i * WINDOW_SECONDS   # when in the recording
+        rows.append(row)
+    return rows
+
+
+# give each feature a consistent color accross plots (claude's idea)
+def MakeColorMap(groups):
+    colors = {"No object": "gray", "nan": "gray"}
+    palette = plt.cm.tab10.colors
+    others = sorted(
+        [g for g in groups if pd.notna(g) and g != "No object"],
+        key=str
+    )
+
+    for i, g in enumerate(others):
+
+        colors[g] = palette[(i + 1) % 10]
+
+    colors[np.nan] = "gray"
+    return colors
+
+# takes in recordings, plots a zoomed in wave
+def PlotRawWaves(recordings, colors):
+    count = len(recordings)
+    fig, axes = plt.subplots(count, 1, figsize=(10, 2.2 * count), sharex=True)
+    axes = np.atleast_1d(axes)
+
+    for ax, rec in zip(axes, recordings):
+        sr, sig = rec["sample_rate"], rec["signal"]
+        middle = len(sig) // 2
+        n = int(0.010 * sr)                        # 10 milliseconds of signal
+        chunk = sig[middle: middle + n]
+        ms = np.arange(len(chunk)) / sr * 1000     # time axis in milliseconds
+        ax.plot(ms, chunk, color=colors[rec["group"]])
+        ax.set_ylabel("signal")
+        ax.set_title(f'{rec["frequency"]} hrtz | {rec["group"]} | {rec["name"]}',
+                     fontsize=9, loc="left")
+        
+        ax.grid(alpha=0.3)
+    axes[-1].set_xlabel("time (milliseconds)")
+
+    fig.suptitle("raw signal (zoomed in)")
+    fig.tight_layout()
+
+# plots each feature over length of recording
+def PlotOverTime(all_windows, colors, feature):
+
+    freqs = sorted(all_windows["frequency"].unique())
+    fig, axes = plt.subplots(1, len(freqs), figsize=(6 * len(freqs), 4), squeeze=False)
+
+    for ax, freq in zip(axes[0], freqs):
+        subset = all_windows[all_windows["frequency"] == freq]
+        for name, rec in subset.groupby("name"):
+            ax.plot(rec["time_s"], rec[feature], marker="o", markersize=2,
+                    color=colors[rec["group"].iloc[0]],
+                    label=f'{rec["group"].iloc[0]}  ({name[-25:]})')
+        ax.set_title(f"{freq} Hrtz")
+        ax.set_xlabel("time in recording (seconds)")
+        ax.set_ylabel(feature)
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=7)
+
+    fig.suptitle(f"{feature}")
+    fig.tight_layout()
+
+# plot a scatter plot
+def PlotScatter(all_windows, colors):
+    pairs = [("loudness", "spikiness"),
+             ("loudness", "wobble"),
+             ("zero_crossings", "kurtosis")]
+    freqs = sorted(all_windows["frequency"].unique())
+    fig, axes = plt.subplots(len(freqs), len(pairs),
+                             figsize=(5 * len(pairs), 4.2 * len(freqs)), squeeze=False)
+
+    for row, freq in enumerate(freqs):
+        subset = all_windows[all_windows["frequency"] == freq]
+        for col, (x_name, y_name) in enumerate(pairs):
+            ax = axes[row][col]
+            for group, g in subset.groupby("group"):
+                ax.scatter(g[x_name], g[y_name], s=14, alpha=0.6,
+                           color=colors[group], label=group)
+            ax.set_xlabel(x_name)
+            ax.set_ylabel(y_name)
+            ax.set_title(f"{freq} hrtz", fontsize=10)
+            ax.grid(alpha=0.3)
+            if row == 0 and col == 0:
+                ax.legend()
+    fig.suptitle("dot-->one second window")
+    fig.tight_layout()
+
+# plot a box plot
+def PlotBoxes(all_windows, colors):
+    freqs = sorted(all_windows["frequency"].unique())
+    for freq in freqs:
+        subset = all_windows[all_windows["frequency"] == freq]
+        groups = sorted(subset["group"].unique())
+
+        fig, axes = plt.subplots(3, 3, figsize=(12, 9))
+        for ax, feature in zip(axes.ravel(), FEATURES):
+            data = [subset.loc[subset["group"] == g, feature] for g in groups]
+            box = ax.boxplot(data, patch_artist=True, showfliers=False)
+            for patch, g in zip(box["boxes"], groups):
+                patch.set_facecolor(colors[g])
+            ax.set_xticks(range(1, len(groups) + 1))
+            ax.set_xticklabels([g[:14] for g in groups], rotation=20, fontsize=8)
+            ax.set_title(feature)
+        fig.suptitle(f"{freq} hrtz (box = middle 50% of windows)")
+        fig.tight_layout()
+
+
+
+# avg each feature
+def print_summary(all_windows):
+    # pd.set_option("display.width", 200)
+    # pd.set_option("display.float_format", "{:.4g}".format)
+
+    for freq in sorted(all_windows["frequency"].unique()):
+        subset = all_windows[all_windows["frequency"] == freq]
+        means = subset.groupby("has_object")[FEATURES].mean().T
+        means.columns = ["no object" if not c else "object" for c in means.columns]
+
+        if "object" in means and "no object" in means:
+            means["% change"] = (means["object"] - means["no object"]) / means["no object"].abs() * 100
+
+        print(f"\n----- {freq} hrtz: average feature values -------\n")
+        print(means.to_string())
+
+
+# ---------------------------------main--------------------------------------
+def main():
+    # print("What the features mean:")
+    # for name, text in FEATURE_HELP.items():
+    #     print(f"  {name:15s} {text}")
+
+    info = ReadCSV(CSV_FILE)
+
+    info_lookup = {
+        row["name"].lower().removesuffix(".wav"): row
+        for _, row in info.iterrows()
+    }
+
+    recordings = []      # raw signals (used for the zoomed waveform plot)
+    window_rows = []     # one row per 1-second window (used for everything else)
+
+    # for _, row in info.iterrows():
+    for filename in RECORDING_FILES_NAMES:
+        key = filename.lower().removesuffix(".wav")
+        # if key not in wav_files:
+        #     print(f'\nWARNING: no .wav file found for "{row["name"]}" - skipping it.')
+        #     continue
+
+        row = info_lookup[key]
+        path = os.path.join(WAV_FOLDER, filename)
+        sample_rate, signal = wavfile.read(path)
+        # Convert audio samples to floating point (was having issues with integer overflow in loudness calc's)
+        signal = signal.astype(np.float64)
+        print(f'\nLoaded {row["name"]}  ({len(signal) / sample_rate:.0f} s, '
+              f'{row["frequency"]} hrtz, {row["group"]})')
+        recordings.append({"name": row["name"], "frequency": row["frequency"],
+                           "group": row["group"] if pd.notna(row["group"]) else "No object", "sample_rate": sample_rate,
+                           "signal": signal})
+        for features in MeasureRecording(signal, sample_rate):
+            features["name"] = row["name"]
+            features["frequency"] = row["frequency"]
+            features["group"] = row["group"]
+            features["has_object"] = row["has_object"]
+            window_rows.append(features)
+
+    if not window_rows:
+        raise SystemExit("No recordings were matched. Check WAV_FOLDER and the "
+                         "'Recording Filename' column in your CSV.")
+
+    all_windows = pd.DataFrame(window_rows)
+    colors = MakeColorMap(all_windows["group"].unique())
+
+    print_summary(all_windows)
+
+    # Sort recordings so each frequency is grouped together in the zoom plot
+    recordings.sort(key=lambda r: (r["frequency"], r["group"]))
+    
+    PlotRawWaves(recordings, colors)
+    PlotOverTime(all_windows, colors, feature="loudness")
+    PlotScatter(all_windows, colors)
+    PlotBoxes(all_windows, colors)
+
+    plt.show()   # opens all the figures at once
+
+
+if __name__ == "__main__":
+    main()
