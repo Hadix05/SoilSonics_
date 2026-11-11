@@ -26,11 +26,13 @@ WAV_FOLDER = "InitialTestData"
 CSV_FILE = "InitialTestData/InitialTestDatasheet(Sheet1).csv"    
 
 WINDOW_SECONDS = 1.0   
-TRIM_SECONDS = 3.0     
+TRIM_SECONDS = 7.0     
 
 COL_FILENAME = "Recording Filename"
 COL_OBJECT = "Type of Object"
 COL_FREQ = "hrtz"
+
+RAW_WAVE_DURATION = 0.050
 
 RECORDING_FILES_NAMES = [
     "11-5-26-initial-system-test.wav",
@@ -47,12 +49,12 @@ FEATURE_HELP = {
     "loudness":        "Average strength of the signal (RMS). Bigger = louder.",
     "peak":            "The single biggest spike in the window.",
     "peak_to_peak":    "Distance from the lowest dip to the highest spike.",
-    "spikiness":       "Peak divided by loudness (crest factor). A pure steady tone "
+    "crest factor":       "Peak divided by loudness (crest factor). A pure steady tone "
                        "is about 1.4; spiky/noisy signals are higher.",
     "zero_crossings":  "How many times per second the wave crosses the zero line. "
                        "Roughly tells how fast / how noisy the wave is.",
     "envelope_mean":   "Average height of the wave's outline (its 'envelope').",
-    "wobble":          "How much that outline changes over time. 0 = perfectly steady, "
+    "Coefficient of Variation of the envelope":          "How much that outline changes over time. 0 = perfectly steady, "
                        "bigger = the volume is fluctuating.",
     "skewness":        "Is the wave lopsided (more positive than negative)? 0 = balanced.",
     "kurtosis":        "How heavy the 'tails' are. Large values mean rare, extreme spikes.",
@@ -130,15 +132,15 @@ def MeasureWindow(piece, sample_rate):
 
     envelope = np.abs(hilbert(piece))
 
-    # feature choices taken from different tutorials, explanations given at top of code
+    # feature choices taken from different tutorials + AI, explanations given at top of code
     return {
         "loudness": loudness,
         "peak": peak,
         "peak_to_peak": np.max(piece) - np.min(piece),
-        "spikiness": peak / loudness,
+        "crest factor": peak / loudness,
         "zero_crossings": flips / seconds,
         "envelope_mean": envelope.mean(),
-        "wobble": envelope.std() / envelope.mean(),
+        "Coefficient of Variation of the envelope": envelope.std() / envelope.mean(),
         "skewness": skew(piece),
         "kurtosis": kurtosis(piece),
     }
@@ -186,7 +188,7 @@ def PlotRawWaves(recordings, colors):
     for ax, rec in zip(axes, recordings):
         sr, sig = rec["sample_rate"], rec["signal"]
         middle = len(sig) // 2
-        n = int(0.010 * sr)                        # 10 milliseconds of signal
+        n = int(RAW_WAVE_DURATION * sr)                   
         chunk = sig[middle: middle + n]
         ms = np.arange(len(chunk)) / sr * 1000     # time axis in milliseconds
         ax.plot(ms, chunk, color=colors[rec["group"]])
@@ -198,6 +200,30 @@ def PlotRawWaves(recordings, colors):
     axes[-1].set_xlabel("time (milliseconds)")
 
     fig.suptitle("raw signal (zoomed in)")
+    fig.tight_layout()
+
+# Plots pure theoretical sine waves for 2000 Hz and 2350 Hz (AI help)
+def PlotSineWaves(sample_rate):
+
+    frequencies = [2000, 2350]
+    fig, axes = plt.subplots(len(frequencies), 1, figsize=(10, 2.2 * len(frequencies)), sharex=True)
+    axes = np.atleast_1d(axes)
+
+    num_samples = int((RAW_WAVE_DURATION) * sample_rate)
+    time_sec = np.arange(num_samples) / sample_rate
+    time_ms = time_sec * 1000.0
+
+    for ax, freq in zip(axes, frequencies):
+        pure_sine = np.sin(2 * np.pi * freq * time_sec)
+        
+        ax.plot(time_ms, pure_sine, color="dodgerblue", linewidth=1.5)
+        ax.set_ylabel("Amplitude")
+        ax.set_title(f"Theoretical Transmitter Output: {freq} Hz", fontsize=9, loc="left")
+        ax.grid(alpha=0.3)
+        ax.set_ylim(-1.1, 1.1)
+
+    axes[-1].set_xlabel("Time (milliseconds)")
+    fig.suptitle("Pure Transmitter Reference Waves")
     fig.tight_layout()
 
 # plots each feature over length of recording
@@ -223,8 +249,8 @@ def PlotOverTime(all_windows, colors, feature):
 
 # plot a scatter plot
 def PlotScatter(all_windows, colors):
-    pairs = [("loudness", "spikiness"),
-             ("loudness", "wobble"),
+    pairs = [("loudness", "crest factor"),
+             ("loudness", "Coefficient of Variation of the envelope"),
              ("zero_crossings", "kurtosis")]
     freqs = sorted(all_windows["frequency"].unique())
     fig, axes = plt.subplots(len(freqs), len(pairs),
@@ -241,6 +267,10 @@ def PlotScatter(all_windows, colors):
             ax.set_ylabel(y_name)
             ax.set_title(f"{freq} hrtz", fontsize=10)
             ax.grid(alpha=0.3)
+            if y_name == "kurtosis":
+                # forces both 2000 and 2350 hrtz to share the same zoom window, cuts off the outlier at 10+
+                ax.set_ylim(-1.5, 1.0)
+                ax.set_xlim(100, 200)
             if row == 0 and col == 0:
                 ax.legend()
     fig.suptitle("dot-->one second window")
@@ -267,7 +297,7 @@ def PlotBoxes(all_windows, colors):
 
 
 
-# avg each feature
+# avg each feature across all recordings
 def print_summary(all_windows):
     # pd.set_option("display.width", 200)
     # pd.set_option("display.float_format", "{:.4g}".format)
@@ -335,8 +365,9 @@ def main():
 
     # Sort recordings so each frequency is grouped together in the zoom plot
     recordings.sort(key=lambda r: (r["frequency"], r["group"]))
-    
+
     PlotRawWaves(recordings, colors)
+    PlotSineWaves(16000)
     PlotOverTime(all_windows, colors, feature="loudness")
     PlotScatter(all_windows, colors)
     PlotBoxes(all_windows, colors)
